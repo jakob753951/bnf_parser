@@ -28,10 +28,21 @@ struct BNF {
 
 impl BNF {
     pub fn parse(value: String) -> Result<BNF, ParseError> {
+        // new strategy to avoid dying on recursive or looping definitions:
+        // parse all rule-names first
+        // get expressions for each rule after
+        // maybe do a HashSet of the rules?
+        // the expressions can be parsed in the same way,
+        // and the order of the rules won't matter
+        // which means we can use the original spec without reordering
         let rules_strings = value
             .split("\n\n")
-            .map(String::from)
-            .collect::<Vec<String>>();
+            .collect::<Vec<&str>>();
+
+        let rule_names = rules_strings
+            .iter()
+            .map(|name| Rule::parse_name(&name))
+            .try_collect::<Vec<&str>>()?;
 
         let mut rules: Vec<Rule> = Vec::new();
 
@@ -39,7 +50,7 @@ impl BNF {
             rules.push(Rule::parse_rule(rule_string, &rules)?);
         }
 
-        Ok(BNF { rules })
+        Ok(BNF { rules: rules })
     }
 }
 
@@ -50,20 +61,33 @@ struct Rule {
 }
 
 impl Rule {
-    fn parse_rule(value: String, rules: &Vec<Rule>) -> Result<Self, ParseError> {
+    fn parse_rule(value: &str, rules: &Vec<Rule>) -> Result<Self, ParseError> {
         let parts = value
             .split("::=")
             .map(String::from)
             .collect::<Vec<String>>();
-        let name = strip_whitespace(String::from(parts[0].clone()));
+        let name = parts[0].trim();
 
-        let expressions = String::from(parts[1].clone())
+        let expressions = parts[1]
             .split("|")
-            .map(String::from)
             .map(|str| Expression::parse_expression(str, rules))
             .try_collect::<Vec<Expression>>()?;
 
-        Ok(Rule { name, expressions })
+        Ok(Rule {
+            name: name.to_string(),
+            expressions,
+        })
+    }
+
+    fn parse_name<'a>(value: &'a str) -> Result<&'a str, ParseError> {
+        Ok(
+            value
+                .split("::=")
+                .next()
+                .ok_or(ParseError::NoPatternMatch)?
+                .clone()
+                .trim()
+        )
     }
 }
 
@@ -75,11 +99,11 @@ enum Expression {
 }
 
 impl Expression {
-    fn get_rule(name: String, rules: &Vec<Rule>) -> Result<Rule, ParseError> {
+    fn get_rule(name: &str, rules: &Vec<Rule>) -> Result<Rule, ParseError> {
         let rule = rules
             .iter()
             .find(|rule| rule.name == name)
-            .ok_or(ParseError::RuleNotFound(name));
+            .ok_or(ParseError::RuleNotFound(name.to_string()));
 
         match rule {
             Ok(rule) => Ok(rule.clone()),
@@ -87,21 +111,27 @@ impl Expression {
         }
     }
 
-    pub fn parse_expression(value: String, rules: &Vec<Rule>) -> Result<Expression, ParseError> {
-        let stripped_value = strip_whitespace(value);
-        let first_char = stripped_value
+    pub fn parse_expression(value: &str, rules: &Vec<Rule>) -> Result<Expression, ParseError> {
+        let value = value.trim();
+        let first_char = value
+            .trim()
             .clone()
             .chars()
             .next()
             .ok_or(ParseError::EmptyString)?;
         match first_char {
-            '"' => Ok(Expression::String(stripped_value)),
+            '"' => Ok(Expression::String(value.to_string())),
             '<' => {
-                if stripped_value.chars().filter(|c| c == &'>').count() == 1 {
-                    return Ok(Expression::Rule(Self::get_rule(stripped_value, rules)?))
+                if value.chars().filter(|c| c == &'>').count() == 1 {
+                    return Ok(Expression::Rule(Self::get_rule(value, rules)?));
                 }
-                Ok(Expression::Rule(Self::get_rule(stripped_value, rules)?))
-            },
+
+                let expressions = value
+                    .split_whitespace()
+                    .map(|name| Expression::parse_expression(name, rules))
+                    .try_collect::<Vec<Expression>>()?;
+                Ok(Expression::ChainedExpression(expressions))
+            }
             _ => Err(ParseError::NoPatternMatch),
         }
     }
@@ -116,25 +146,4 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("{:#?}", bnf);
 
     Ok(())
-}
-
-fn strip_whitespace(str: String) -> String {
-    str.split_whitespace()
-        .map(String::from)
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<String>>()
-        .join(" ")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strip_whitespace_fucking_works() {
-        let input = String::from(" test :) ");
-        let actual = strip_whitespace(input);
-        let expected = String::from("test :)");
-        assert_eq!(actual, expected);
-    }
 }
